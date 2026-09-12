@@ -1,5 +1,13 @@
 # Parmana × Phinite — Agentic Commerce Refund Demo
 
+## What use case did we build?
+
+> **Agentic commerce refund authorization agent:** a Phinite AI agent understands customer refund requests and extracts the refund intent, while Parmana independently authorizes and governs the consequential refund execution. The agent cannot approve refunds or call Paytm directly. Trusted business signals — refund eligibility, manager approval, and fraud-check status — are supplied separately. Parmana enforces the `paytm:refund` capability and produces execution evidence, with **DENIED → STOP**, **AMBIGUOUS → VERIFY**, and **APPROVED → governed execution**.
+
+### In one sentence
+
+**A customer asks an AI agent for a refund; the AI understands the request, Parmana decides whether the action is authorized, and only an authorized execution path can proceed.**
+
 > **AI can be intelligent without being in charge.**
 
 This repository demonstrates an agentic-commerce refund workflow in which **Phinite provides the AI agent**, while **Parmana remains the independent authorization and execution-governance authority**.
