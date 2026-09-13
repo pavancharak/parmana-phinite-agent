@@ -573,11 +573,14 @@ This is fail-closed behavior.
 
 # 16. Expected AMBIGUOUS behavior
 
-A 409/conflict or another condition where the final execution state cannot be established should be treated as:
+The tool reports `AMBIGUOUS` whenever the final execution state cannot be established rather than guessed at:
 
-```text
-AMBIGUOUS
-```
+- Parmana returns HTTP 409, or HTTP 5xx.
+- Parmana returns HTTP 403 without the recognized `{"code": "POLICY_DENIED"}` body — an unrecognized 403 shape is unresolved, not a confirmed denial.
+- The request could not reach Parmana at all (network/connection failure).
+- Parmana returns HTTP 200 with an execution decision whose `outcome` is `AMBIGUOUS`.
+
+Only an HTTP 403 carrying the exact `{"code": "POLICY_DENIED"}` body, or a 200 response whose decision `outcome` is `DENIED`, is reported as `DENIED`. No other failure shape is inferred to be a denial.
 
 The agent must not say:
 
@@ -749,9 +752,11 @@ A malformed request can produce HTTP 400 even when Parmana itself is healthy.
 | `jsonInput: {}` | Direct runner supplied empty input | Phinite execution log | Test through the graph and verify tool input configuration |
 | Phinite shows green `SUCCESS` but result contains traceback | Wrapper completed, tool failed | Execution log result | Inspect actual tool result, not wrapper status |
 | HTTP 400 | Malformed request/body/schema | Raw response body and JSON | Fix request formatting/schema |
-| HTTP 403 | Authentication/capability/authorization issue | Response `code`, caller scope | Inspect exact error; do not bypass policy |
-| HTTP 409 | Execution state is uncertain/conflict | Response body and Business Transaction ID | Treat as `AMBIGUOUS`; verify before retrying |
-| HTTP 5xx | Server/downstream failure | Parmana deployment logs | Treat final outcome as unknown until verified |
+| HTTP 403 with `{"code": "POLICY_DENIED"}` | Confirmed policy denial | Response body | Reported as `DENIED`; this is terminal, do not retry with altered parameters |
+| HTTP 403 without that exact body | Authentication/capability/authorization issue, but not a confirmed decision | Response `code`, caller scope | Reported as `AMBIGUOUS`, not `DENIED`; inspect exact error, do not bypass policy |
+| HTTP 409 | Execution state is uncertain/conflict | Response body and Business Transaction ID | Reported as `AMBIGUOUS`; verify before retrying |
+| HTTP 5xx | Server/downstream failure | Parmana deployment logs | Reported as `AMBIGUOUS`; treat final outcome as unknown until verified |
+| Network/connection failure (no HTTP response) | Request may not have reached Parmana | Connectivity, `PARMANA_API_URL` | Reported as `AMBIGUOUS`, not a crash and not `DENIED` |
 | Agent invents trusted signals | Prompt/runtime boundary violation | Tool inputs and trusted context source | Only accept structured trusted business context |
 | Agent calls Paytm directly | Architecture violation | Agent tools/credentials | Remove Paytm access from agent |
 | Edited code but old behavior persists | Old tool version still attached | Published version + Master Agent Tools | Publish and confirm attached version |
@@ -874,6 +879,8 @@ The fix was:
 
 No wildcard capability was introduced.
 
+This fix had been documented here but not actually committed to `phinite/parmana_refund_tool.py` — the shipped tool kept sending `"action": "refund"`, so every real call failed capability matching before reaching `APPROVED`. The tool code now sends `"action": "paytm:refund"`, matching this section.
+
 ---
 
 ## Failure 3 — HTTP 409
@@ -917,6 +924,25 @@ curl.exe -i "https://parmana-api-real.vercel.app/execute" `
   -H "Accept: application/json" `
   --data-binary "@test-refund.json"
 ```
+
+---
+
+## Failure 5 — Unrecognized errors crashed instead of resolving to a state
+
+The tool's error handling only recognized `DENIED` when a 403 response body was exactly `{"code": "POLICY_DENIED", ...}`, and only recognized `AMBIGUOUS` for HTTP 409/5xx. Any other 403 shape, a network failure that never reached Parmana, or an HTTP 200 whose embedded decision `outcome` was `DENIED`/`AMBIGUOUS` (rather than `APPROVED`) all fell through to an unhandled `RuntimeError` — a crash, not one of the three documented states.
+
+The fix does not guess `DENIED` for these cases, because `DENIED` is a specific, confirmed decision and must not be inferred from an unrecognized response shape. Everything unresolved now resolves to `AMBIGUOUS`:
+
+```text
+Unrecognized 403 body           -> AMBIGUOUS
+Network/connection failure      -> AMBIGUOUS
+200 response, outcome=DENIED    -> DENIED (now handled instead of crashing)
+200 response, outcome=AMBIGUOUS -> AMBIGUOUS (now handled instead of crashing)
+```
+
+Lesson:
+
+> **An unresolved outcome must resolve to `AMBIGUOUS`, never to a guessed `DENIED`, and never to a crash.**
 
 ---
 
