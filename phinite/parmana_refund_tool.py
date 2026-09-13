@@ -112,7 +112,7 @@ def main(inputs, env_variables):
         "intent": {
             "intentId": intent_id,
             "authorizationId": authorization_id,
-            "action": "refund",
+            "action": "paytm:refund",
             "target": order_id,
             "parameters": {
                 "orderId": order_id,
@@ -154,18 +154,24 @@ def main(inputs, env_variables):
             raw = response.read().decode("utf-8")
     except HTTPError as exc:
         raw = exc.read().decode("utf-8", errors="replace")
-        if exc.code == 403:
-            try:
-                denied = json.loads(raw)
-            except json.JSONDecodeError:
-                denied = {}
-            if denied.get("code") == "POLICY_DENIED":
-                return {"output": {"status": "DENIED", "executed": False, "state": "DENIED", "businessTransactionId": business_id, "reason": denied.get("error", "Parmana policy rejected the refund")}}
-        if exc.code == 409 or exc.code >= 500:
-            return {"output": {"status": "AMBIGUOUS", "executed": False, "state": "UNKNOWN", "businessTransactionId": business_id, "reason": f"Parmana returned HTTP {exc.code}; execution outcome is unknown"}}
+        try:
+            denied = json.loads(raw)
+        except json.JSONDecodeError:
+            denied = {}
+
+        if exc.code == 403 and denied.get("code") == "POLICY_DENIED":
+            return {"output": {"status": "DENIED", "executed": False, "state": "DENIED", "businessTransactionId": business_id, "reason": denied.get("error", "Parmana policy rejected the refund")}}
+        if exc.code == 403 or exc.code == 409 or exc.code >= 500:
+            # A 403 without a recognizable POLICY_DENIED body, a 409, or a
+            # server error means the final execution state cannot be
+            # established -- it must not be reported as DENIED (that is a
+            # specific, confirmed decision) or crash the caller.
+            return {"output": {"status": "AMBIGUOUS", "executed": False, "state": "UNKNOWN", "businessTransactionId": business_id, "reason": f"Parmana returned HTTP {exc.code} without a recognizable decision; execution outcome is unknown"}}
         raise RuntimeError(f"Parmana API HTTP {exc.code}: {raw}") from exc
     except URLError as exc:
-        raise RuntimeError(f"Unable to reach Parmana: {exc.reason}") from exc
+        # The request may or may not have reached Parmana, so the outcome is
+        # unresolved rather than a confirmed failure.
+        return {"output": {"status": "AMBIGUOUS", "executed": False, "state": "UNKNOWN", "businessTransactionId": business_id, "reason": f"Unable to reach Parmana: {exc.reason}"}}
 
     try:
         result = json.loads(raw)
@@ -184,8 +190,14 @@ def main(inputs, env_variables):
         raise RuntimeError("Parmana response contained no execution decision")
     last = executions[-1] if isinstance(executions[-1], dict) else {}
     decision = last.get("decision") if isinstance(last.get("decision"), dict) else {}
-    if decision.get("outcome") != "APPROVED":
-        raise RuntimeError("Parmana returned HTTP 200 without an APPROVED execution decision")
+    outcome = decision.get("outcome")
+
+    if outcome == "DENIED":
+        return {"output": {"status": "DENIED", "executed": False, "state": "DENIED", "businessTransactionId": business_id, "reason": decision.get("reason", "Parmana policy rejected the refund")}}
+    if outcome == "AMBIGUOUS":
+        return {"output": {"status": "AMBIGUOUS", "executed": False, "state": "UNKNOWN", "businessTransactionId": business_id, "reason": decision.get("reason", "Parmana reported an ambiguous execution outcome")}}
+    if outcome != "APPROVED":
+        raise RuntimeError(f"Parmana returned HTTP 200 with an unrecognized execution outcome: {outcome!r}")
 
     auth_envelope = result.get("authorization") if isinstance(result.get("authorization"), dict) else {}
     auth_payload = auth_envelope.get("payload") if isinstance(auth_envelope.get("payload"), dict) else {}
